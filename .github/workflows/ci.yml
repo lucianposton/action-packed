@@ -1,0 +1,279 @@
+name: 'CI'
+
+on:
+    push:
+    pull_request:
+    #schedule:
+    #    - cron: '*/15 * * * *'
+    #    - cron: '0 21 * * *'
+    repository_dispatch:
+        # NOTE To trigger a release via repository_dispatch, call with a
+        # Personal Access Tokens stored in the GITHUB_TOKEN environment
+        # variable:
+        # curl -v -H "Accept: application/vnd.github.everest-preview+json" \
+        #    -H "Authorization: token ${GITHUB_TOKEN}" \
+        #    https://api.github.com/repos/[org-name-or-username]/[repository]/dispatches \
+        #    -d '{ "event_type": "my-event", "client_payload": {"my-msg": "test123"} }'
+        #
+        # https://help.github.com/en/github/authenticating-to-github/creating-a-personal-access-token-for-the-command-line
+        types:
+            - 'my-event'
+
+# TODO coverage
+# TODO https://github.com/codecov/codecov-action
+
+# More actions:
+# https://github.com/sdras/awesome-actions
+jobs:
+    yamllint:
+        name: 'Lint YAML'
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v2
+            - uses: ibiqlik/action-yamllint@master
+
+    hadolint:
+        name: 'Lint Dockerfile'
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v2
+            - uses: brpaz/hadolint-action@master
+
+    shellcheck:
+        name: 'Lint shell scripts'
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v2
+            - uses: azohra/shell-linter@master
+              with:
+                  path: ".,test/*.bats"
+
+    bats:
+        name: "BATS tests"
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v2
+            - uses: mig4/setup-bats@v1
+            - run: bats -r test
+
+    semantic-release:
+        name: 'Semantic release'
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/master') || github.event_name == 'schedule'
+        needs:
+            - 'build_docker_image'
+        runs-on: ubuntu-latest
+        env:
+            # NOTE Pushing tags with secrets.GITHUB_TOKEN will prevent push events
+            #GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+            GITHUB_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
+            DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+            DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        steps:
+            - uses: actions/checkout@v2
+              with:
+                  # NOTE @v2 uses the token as an auth http header. Set it to
+                  # a Personal Access Token instead of secrets.GITHUB_TOKEN
+                  # so that tag pushes trigger repo push events.
+                  token: ${{ secrets.REPO_ACCESS_TOKEN }}
+            - uses: cycjimmy/semantic-release-action@v2
+              id: semantic
+              with:
+                  # NOTE Enable plugins in .releaserc
+                  extra_plugins: |
+                      @semantic-release/git
+                      #semantic-release-docker
+            - name: 'Update major version release branch'
+              if: steps.semantic.outputs.new_release_published == 'true'
+              run: >-
+                  git push
+                  https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git
+                  HEAD:refs/heads/v${{ steps.semantic.outputs.new_release_major_version }}
+
+
+    update-semver:
+        name: 'Update major/minor version release tags'
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v2
+            - uses: haya14busa/action-update-semver@master
+
+    build_docker_image:
+        name: 'Build docker image'
+        if: github.event_name == 'push' || github.event_name == 'schedule'
+        needs:
+            - 'yamllint'
+            - 'hadolint'
+            - 'shellcheck'
+            - 'bats'
+        runs-on: ubuntu-latest
+        env:
+            DOCKER_FILE: Dockerfile
+            DOCKER_PATH: '.'
+        steps:
+            - uses: actions/checkout@v2
+
+            - run: mkdir -p ~/image-cache
+
+            - name: 'Cache image'
+              id: image-cache
+              uses: actions/cache@v1
+              with:
+                  path: ~/image-cache
+                  key: image-cache-${{ runner.os }}-${{ github.sha }}
+
+            - name: 'Build docker image'
+              if: steps.image-cache.outputs.cache-hit != 'true' || github.event_name == 'schedule'
+              run: |
+                  docker build -t "$GITHUB_SHA" -f "$DOCKER_FILE" "$DOCKER_PATH"
+                  docker save -o ~/image-cache/"$GITHUB_SHA".tar "$GITHUB_SHA"
+
+            - name: 'Load docker image'
+              if: steps.image-cache.outputs.cache-hit == 'true' && github.event_name != 'schedule'
+              run: docker load -i ~/image-cache/"$GITHUB_SHA".tar
+
+            - name: 'Structure tests'
+              uses: brpaz/structure-tests-action@master
+              with:
+                  image: ${{ github.sha }}
+                  configFile: 'test/structure-tests.yaml'
+
+    push_docker_image:
+        name: 'Push docker image'
+        if: github.event_name == 'push' || github.event_name == 'schedule'
+        needs:
+            - 'build_docker_image'
+        runs-on: ubuntu-latest
+        env:
+            # e.g. ${{ github.actor }} or ${{ secrets.DOCKER_USERNAME }}
+            DOCKER_USERNAME: ${{ github.actor }}
+            # e.g. ${{ secrets.GITHUB_TOKEN }} or  ${{ secrets.DOCKER_PASSWORD }}
+            DOCKER_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+            # e.g. docker.pkg.github.com or docker.io
+            DOCKER_REGISTRY: docker.pkg.github.com
+            # e.g. ${{ github.repository }} or ${{ secrets.DOCKER_USERNAME }}
+            DOCKER_REPOSITORY: ${{ github.repository }}
+            DOCKER_IMAGE_NAME: ${{ github.event.repository.name }}
+            DOCKER_IMAGE_TAG: TODO-extra-tag
+            DOCKER_FILE: Dockerfile
+            DOCKER_PATH: '.'
+        steps:
+            - uses: actions/checkout@v2
+
+            - run: mkdir -p ~/image-cache
+
+            - name: 'Cache image'
+              id: image-cache
+              uses: actions/cache@v1
+              with:
+                  path: ~/image-cache
+                  key: image-cache-${{ runner.os }}-${{ github.sha }}
+
+            - name: 'Build docker image'
+              if: steps.image-cache.outputs.cache-hit != 'true'
+              run: |
+                  docker build -t "$GITHUB_SHA" -f "$DOCKER_FILE" "$DOCKER_PATH"
+                  docker save -o ~/image-cache/"$GITHUB_SHA".tar "$GITHUB_SHA"
+
+            - name: 'Load docker image'
+              if: steps.image-cache.outputs.cache-hit == 'true'
+              run: docker load -i ~/image-cache/"$GITHUB_SHA".tar
+
+            - name: 'Tag image with commit sha'
+              if: github.sha != ''
+              run: docker tag "$GITHUB_SHA" "$DOCKER_REGISTRY/$DOCKER_REPOSITORY/$DOCKER_IMAGE_NAME:$GITHUB_SHA"
+
+            - name: 'Tag image with "${{ env.DOCKER_IMAGE_TAG }}"'
+              if: github.ref == 'refs/heads/master' && env.DOCKER_IMAGE_TAG  != ''
+              run: docker tag "$GITHUB_SHA" "$DOCKER_REGISTRY/$DOCKER_REPOSITORY/$DOCKER_IMAGE_NAME:$DOCKER_IMAGE_TAG"
+
+            - name: 'Tag image with git branch name (or "latest" if master)'
+              if: startsWith(github.ref, 'refs/heads/')
+              run: |
+                  tag="${GITHUB_REF#refs/heads/}"
+                  [ "$tag" == "master" ] && tag=latest
+                  docker tag "$GITHUB_SHA" "$DOCKER_REGISTRY/$DOCKER_REPOSITORY/$DOCKER_IMAGE_NAME:$tag"
+
+            - name: 'Tag image with git tag'
+              if: startsWith(github.ref, 'refs/tags/')
+              run: |
+                  tag="${GITHUB_REF#refs/tags/}"
+                  tag="${tag#v}"
+                  docker tag "$GITHUB_SHA" "$DOCKER_REGISTRY/$DOCKER_REPOSITORY/$DOCKER_IMAGE_NAME:$tag"
+
+            - name: 'Docker login'
+              run: echo "$DOCKER_PASSWORD" | docker login "$DOCKER_REGISTRY" -u "$DOCKER_USERNAME" --password-stdin
+
+            #- name: 'Push all tags to ${{ env.DOCKER_REGISTRY }}'
+            #  run: docker push "$DOCKER_REGISTRY/$DOCKER_REPOSITORY/$DOCKER_IMAGE_NAME"
+
+            - name: 'Docker logout'
+              run: docker logout "$DOCKER_REGISTRY"
+
+    publish_docker_image:
+        name: 'Publish docker image'
+        if: github.event_name == 'push' || github.event_name == 'schedule'
+        needs:
+            - 'yamllint'
+            - 'hadolint'
+            - 'shellcheck'
+            - 'bats'
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v2
+
+            #- name: 'Determine a default image name'
+            #  id: default_image_name
+            #  run: echo "::set-output name=value::${GITHUB_REPOSITORY#*/}"
+
+            #- name: 'Build and push images to docker.io registry'
+            #  uses: elgohr/Publish-Docker-Github-Action@master
+            #  with:
+            #      name: myDocker/repository
+            #      username: ${{ secrets.DOCKER_USERNAME }}
+            #      password: ${{ secrets.DOCKER_PASSWORD }}
+            #      tag_names: true
+
+            #- name: 'Build and push images to github registry'
+            #  uses: elgohr/Publish-Docker-Github-Action@master
+            #  with:
+            #      registry: docker.pkg.github.com
+            #      name: ${{ github.repository }}/${{ steps.default_image_name.outputs.value }}
+            #      username: ${{ github.actor }}
+            #      password: ${{ secrets.GITHUB_TOKEN }}
+            #      tag_names: true
+
+    send_dispatch:
+        name: 'Send repository dispatch'
+        if: github.event_name != 'repository_dispatch'
+        needs:
+            - 'yamllint'
+            - 'hadolint'
+            - 'shellcheck'
+            - 'bats'
+        runs-on: ubuntu-latest
+        steps:
+            - uses: peter-evans/repository-dispatch@v1
+              with:
+                  token: ${{ secrets.REPO_ACCESS_TOKEN }}
+                  repository: ${{ github.repository }}
+                  event-type: my-event
+                  client-payload: '{"my-msg": "test123", "github": ${{ toJson(github) }}}'
+
+    dispatch_handler:
+        name: 'Dispatch handler'
+        if: github.event_name == 'repository_dispatch'
+        runs-on: ubuntu-latest
+        steps:
+            - if: github.event.action == 'my-event'
+              run: echo 'payload ${{ toJson(github.event) }}'
+            - uses: actions/github-script@master
+              with:
+                  # nifty one-liners: https://github.com/actions/github-script#user-content-examples
+                  # https://octokit.github.io/rest.js/v17#repos-get-latest-release
+                  script: |
+                      const result = await github.repos.getLatestRelease({
+                          owner: 'SimonKagstrom',
+                          repo: 'kcov'
+                      })
+                      console.log(result.data.tag_name)

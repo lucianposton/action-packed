@@ -1,0 +1,28 @@
+name: 'PR Review'
+
+on:
+    pull_request:
+
+# More actions:
+# https://github.com/reviewdog/reviewdog#user-content-github-actions
+jobs:
+    misspell:
+        name: 'Run Reviewdog'
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v2
+            - uses: reviewdog/action-misspell@v1
+              with:
+                  github_token: ${{ secrets.github_token }}
+            - uses: reviewdog/action-languagetool@v1
+              with:
+                  github_token: ${{ secrets.github_token }}
+            - uses: reviewdog/action-yamllint@v1
+              with:
+                  github_token: ${{ secrets.github_token }}
+            - uses: reviewdog/action-hadolint@v1
+              with:
+                  github_token: ${{ secrets.github_token }}
+            - uses: reviewdog/action-shellcheck@v1
+              with:
+                  github_token: ${{ secrets.github_token }}

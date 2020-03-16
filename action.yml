@@ -1,0 +1,19 @@
+name: 'Action Name'
+description: 'Action Description'
+
+inputs:
+    testenvvar:
+        description: 'test input'
+        required: true
+        default: "foo"
+
+runs:
+    using: 'docker'
+    image: 'Dockerfile'
+    args:
+        - ${{ inputs.testenvvar }}
+
+# See https://haya14busa.github.io/github-action-brandings/
+branding:
+    icon: 'activity'
+    color: 'white'

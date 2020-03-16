@@ -1,0 +1,34 @@
+schemaVersion: 2.0.0
+
+metadataTest:
+    entrypoint: ['/entrypoint.sh']
+
+globalEnvVars:
+    - key: 'TEST'
+      value: 'foo'
+
+commandTests:
+    - name: 'echo echos'
+      command: echo
+      args: ['hello']
+      expectedOutput: ['hello']
+      exitCode: 0
+
+    - name: 'entrypoint.sh works'
+      envVars:
+          - key: 'INPUT_TESTENVVAR'
+            value: 'sir'
+      command: /entrypoint.sh
+      expectedOutput: ['Hello sir']
+      exitCode: 0
+
+fileExistenceTests:
+    - name: 'File exists'
+      path: '/bin/busybox'
+      shouldExist: true
+      permissions: '-rwxr-xr-x'
+
+fileContentTests:
+    - name: 'File has content'
+      path: '/etc/motd'
+      expectedContents: ['.*Alpine.*']
